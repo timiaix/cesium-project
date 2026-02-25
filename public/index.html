@@ -1,0 +1,498 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>海洋几何体剖面 - Ocean Cross Section</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background: linear-gradient(to bottom, #87CEEB 0%, #4682B4 100%);
+            font-family: Arial, sans-serif;
+        }
+        canvas {
+            display: block;
+        }
+        #info {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            color: white;
+            background: rgba(0, 0, 0, 0.5);
+            padding: 10px;
+            border-radius: 5px;
+            font-size: 14px;
+        }
+    </style>
+</head>
+<body>
+    <div id="info">
+        <strong>海洋几何体剖面</strong><br>
+        鼠标拖拽：旋转视角<br>
+        滚轮：缩放<br>
+        右键拖拽：平移
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/three@0.140.0/build/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.140.0/examples/js/controls/OrbitControls.js"></script>
+
+    <script>
+        // ==================== 场景初始化 ====================
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x87CEEB);
+        scene.fog = new THREE.Fog(0x87CEEB, 50, 200);
+
+        const camera = new THREE.PerspectiveCamera(
+            60,
+            window.innerWidth / window.innerHeight,
+            0.1,
+            1000
+        );
+        camera.position.set(40, 25, 40);
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(window.devicePixelRatio);
+        document.body.appendChild(renderer.domElement);
+
+        const controls = new THREE.OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+        controls.dampingFactor = 0.05;
+        controls.target.set(0, 0, 0);
+
+        // 添加环境光和方向光
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+        scene.add(ambientLight);
+
+        const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+        directionalLight.position.set(50, 50, 50);
+        scene.add(directionalLight);
+
+        // ==================== GLSL 噪声函数 ====================
+        // Simplex 3D 噪声函数（用于海底地形和海面波浪）
+        const noiseGLSL = `
+            // Simplex 3D Noise
+            vec3 mod289(vec3 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
+            vec4 mod289(vec4 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
+            vec4 permute(vec4 x) { return mod289(((x*34.0)+1.0)*x); }
+            vec4 taylorInvSqrt(vec4 r) { return 1.79284291400159 - 0.85373472095314 * r; }
+
+            float snoise(vec3 v) {
+                const vec2 C = vec2(1.0/6.0, 1.0/3.0);
+                const vec4 D = vec4(0.0, 0.5, 1.0, 2.0);
+
+                vec3 i  = floor(v + dot(v, C.yyy));
+                vec3 x0 = v - i + dot(i, C.xxx);
+
+                vec3 g = step(x0.yzx, x0.xyz);
+                vec3 l = 1.0 - g;
+                vec3 i1 = min(g.xyz, l.zxy);
+                vec3 i2 = max(g.xyz, l.zxy);
+
+                vec3 x1 = x0 - i1 + C.xxx;
+                vec3 x2 = x0 - i2 + C.yyy;
+                vec3 x3 = x0 - D.yyy;
+
+                i = mod289(i);
+                vec4 p = permute(permute(permute(
+                    i.z + vec4(0.0, i1.z, i2.z, 1.0))
+                    + i.y + vec4(0.0, i1.y, i2.y, 1.0))
+                    + i.x + vec4(0.0, i1.x, i2.x, 1.0));
+
+                float n_ = 0.142857142857;
+                vec3 ns = n_ * D.wyz - D.xzx;
+
+                vec4 j = p - 49.0 * floor(p * ns.z * ns.z);
+
+                vec4 x_ = floor(j * ns.z);
+                vec4 y_ = floor(j - 7.0 * x_);
+
+                vec4 x = x_ *ns.x + ns.yyyy;
+                vec4 y = y_ *ns.x + ns.yyyy;
+                vec4 h = 1.0 - abs(x) - abs(y);
+
+                vec4 b0 = vec4(x.xy, y.xy);
+                vec4 b1 = vec4(x.zw, y.zw);
+
+                vec4 s0 = floor(b0)*2.0 + 1.0;
+                vec4 s1 = floor(b1)*2.0 + 1.0;
+                vec4 sh = -step(h, vec4(0.0));
+
+                vec4 a0 = b0.xzyw + s0.xzyw*sh.xxyy;
+                vec4 a1 = b1.xzyw + s1.xzyw*sh.zzww;
+
+                vec3 p0 = vec3(a0.xy, h.x);
+                vec3 p1 = vec3(a0.zw, h.y);
+                vec3 p2 = vec3(a1.xy, h.z);
+                vec3 p3 = vec3(a1.zw, h.w);
+
+                vec4 norm = taylorInvSqrt(vec4(dot(p0,p0), dot(p1,p1), dot(p2,p2), dot(p3,p3)));
+                p0 *= norm.x;
+                p1 *= norm.y;
+                p2 *= norm.z;
+                p3 *= norm.w;
+
+                vec4 m = max(0.6 - vec4(dot(x0,x0), dot(x1,x1), dot(x2,x2), dot(x3,x3)), 0.0);
+                m = m * m;
+                return 42.0 * dot(m*m, vec4(dot(p0,x0), dot(p1,x1), dot(p2,x2), dot(p3,x3)));
+            }
+
+            // 多层噪声（Fractal Brownian Motion）
+            float fbm(vec3 p) {
+                float value = 0.0;
+                float amplitude = 0.5;
+                float frequency = 1.0;
+                for(int i = 0; i < 4; i++) {
+                    value += amplitude * snoise(p * frequency);
+                    frequency *= 2.0;
+                    amplitude *= 0.5;
+                }
+                return value;
+            }
+        `;
+
+        // ==================== 1. 海底地形 (Seabed) ====================
+        const seabedGeometry = new THREE.PlaneGeometry(50, 30, 100, 60);
+
+        const seabedMaterial = new THREE.ShaderMaterial({
+            uniforms: {
+                uTime: { value: 0 }
+            },
+            vertexShader: `
+                ${noiseGLSL}
+
+                varying vec3 vPosition;
+                varying float vHeight;
+
+                void main() {
+                    vec3 pos = position;
+
+                    // 使用噪声生成海底地形高度
+                    // 海底地形是静态的，不使用 uTime
+                    float noise = fbm(vec3(pos.x * 0.1, pos.y * 0.1, 0.0));
+                    float height = noise * 5.0; // 高度变化范围
+
+                    pos.z = height - 10.0; // 整体下移，作为海底
+
+                    vPosition = pos;
+                    vHeight = height;
+
+                    gl_Position = projectionMatrix * modelViewMatrix * vec4(pos, 1.0);
+                }
+            `,
+            fragmentShader: `
+                varying vec3 vPosition;
+                varying float vHeight;
+
+                void main() {
+                    // 根据高度分层着色
+                    vec3 deepColor = vec3(0.3, 0.2, 0.1);    // 深层：深棕色
+                    vec3 midColor = vec3(0.6, 0.4, 0.2);     // 中层：黄褐色
+                    vec3 shallowColor = vec3(0.8, 0.7, 0.4); // 浅层：沙色
+
+                    // 根据高度混合颜色
+                    float t = (vHeight + 2.5) / 5.0; // 归一化到 0-1
+                    t = clamp(t, 0.0, 1.0);
+
+                    vec3 color;
+                    if(t < 0.5) {
+                        color = mix(deepColor, midColor, t * 2.0);
+                    } else {
+                        color = mix(midColor, shallowColor, (t - 0.5) * 2.0);
+                    }
+
+                    // 添加一些细节变化
+                    color += vec3(0.05) * sin(vPosition.x * 2.0) * cos(vPosition.y * 2.0);
+
+                    gl_FragColor = vec4(color, 1.0);
+                }
+            `,
+            side: THREE.DoubleSide
+        });
+
+        const seabed = new THREE.Mesh(seabedGeometry, seabedMaterial);
+        seabed.rotation.x = -Math.PI / 2;
+        scene.add(seabed);
+
+        // ==================== 1.5 海底地形立方体 (Seabed Base Volume) ====================
+        // 在海底地形下方添加一个立方体，形成完整的地质剖面
+        const seabedBaseGeometry = new THREE.BoxGeometry(50, 8, 30, 50, 10, 30);
+
+        const seabedBaseMaterial = new THREE.ShaderMaterial({
+            vertexShader: `
+                varying vec3 vPosition;
+                varying vec3 vWorldPosition;
+
+                void main() {
+                    vPosition = position;
+                    vec4 worldPos = modelMatrix * vec4(position, 1.0);
+                    vWorldPosition = worldPos.xyz;
+
+                    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+                }
+            `,
+            fragmentShader: `
+                varying vec3 vPosition;
+                varying vec3 vWorldPosition;
+
+                void main() {
+                    // 根据深度分层着色，与海底地形表面保持一致
+                    float depth = vWorldPosition.y;
+
+                    // 三层颜色定义
+                    vec3 deepColor = vec3(0.3, 0.2, 0.1);    // 深层：深棕色
+                    vec3 midColor = vec3(0.6, 0.4, 0.2);     // 中层：黄褐色
+                    vec3 shallowColor = vec3(0.8, 0.7, 0.4); // 浅层：沙色
+
+                    // 根据Y坐标归一化 (底部-18到顶部-10，共8个单位)
+                    float t = (depth + 18.0) / 8.0;
+                    t = clamp(t, 0.0, 1.0);
+
+                    // 分层混合颜色
+                    vec3 color;
+                    if(t < 0.5) {
+                        // 底部到中部：深棕色 → 黄褐色
+                        color = mix(deepColor, midColor, t * 2.0);
+                    } else {
+                        // 中部到顶部：黄褐色 → 沙色
+                        color = mix(midColor, shallowColor, (t - 0.5) * 2.0);
+                    }
+
+                    // 添加地质纹理细节
+                    float stripes = sin(vWorldPosition.y * 3.0) * 0.03;
+                    float noise = sin(vWorldPosition.x * 0.5) * cos(vWorldPosition.z * 0.5) * 0.02;
+                    color += vec3(stripes + noise);
+
+                    gl_FragColor = vec4(color, 1.0);
+                }
+            `,
+            side: THREE.DoubleSide
+        });
+
+        const seabedBase = new THREE.Mesh(seabedBaseGeometry, seabedBaseMaterial);
+        seabedBase.position.y = -14.0; // 位于海底地形下方
+        scene.add(seabedBase);
+
+        // 为海底立方体添加边框线，增强剖面感
+        const seabedBaseEdges = new THREE.EdgesGeometry(seabedBaseGeometry);
+        const seabedBaseEdgesMaterial = new THREE.LineBasicMaterial({
+            color: 0x8B4513,
+            transparent: true,
+            opacity: 0.4
+        });
+        const seabedBaseEdgesLine = new THREE.LineSegments(seabedBaseEdges, seabedBaseEdgesMaterial);
+        seabedBaseEdgesLine.position.copy(seabedBase.position);
+        scene.add(seabedBaseEdgesLine);
+
+        // ==================== 2. 海水体积 (Water Volume) ====================
+        // 创建一个有厚度的海水体积，使用自定义几何体形成剖面效果
+        const waterGeometry = new THREE.BoxGeometry(50, 15, 30, 50, 20, 30);
+
+        const waterMaterial = new THREE.ShaderMaterial({
+            uniforms: {
+                uTime: { value: 0 },
+                uWaterTop: { value: 5.0 },    // 海面高度
+                uWaterBottom: { value: -10.0 } // 海底高度
+            },
+            vertexShader: `
+                varying vec3 vPosition;
+                varying vec3 vWorldPosition;
+
+                void main() {
+                    vPosition = position;
+                    vec4 worldPos = modelMatrix * vec4(position, 1.0);
+                    vWorldPosition = worldPos.xyz;
+
+                    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+                }
+            `,
+            fragmentShader: `
+                varying vec3 vPosition;
+                varying vec3 vWorldPosition;
+
+                uniform float uWaterTop;
+                uniform float uWaterBottom;
+
+                void main() {
+                    // 计算当前片段的深度（Y坐标）
+                    float depth = vWorldPosition.y;
+
+                    // 归一化深度 (0 = 海底, 1 = 海面)
+                    float normalizedDepth = (depth - uWaterBottom) / (uWaterTop - uWaterBottom);
+                    normalizedDepth = clamp(normalizedDepth, 0.0, 1.0);
+
+                    // 根据深度计算颜色：浅蓝 → 深蓝
+                    vec3 shallowColor = vec3(0.4, 0.7, 0.9); // 浅蓝色
+                    vec3 deepColor = vec3(0.0, 0.2, 0.4);    // 深蓝色
+                    vec3 color = mix(deepColor, shallowColor, normalizedDepth);
+
+                    // 根据深度计算透明度：越深越不透明
+                    float alpha = mix(0.85, 0.3, normalizedDepth);
+
+                    // 添加一些体积感的细节
+                    float detail = sin(vWorldPosition.x * 0.5) * cos(vWorldPosition.z * 0.5) * 0.05;
+                    color += vec3(detail);
+
+                    gl_FragColor = vec4(color, alpha);
+                }
+            `,
+            transparent: true,
+            depthWrite: false,
+            depthTest: true,
+            side: THREE.DoubleSide
+        });
+
+        const water = new THREE.Mesh(waterGeometry, waterMaterial);
+        water.position.y = -2.5; // 定位使其顶部在海面，底部在海底
+        scene.add(water);
+
+        // ==================== 3. 海面 (Ocean Surface) ====================
+        const surfaceGeometry = new THREE.PlaneGeometry(50, 30, 100, 60);
+
+        const surfaceMaterial = new THREE.ShaderMaterial({
+            uniforms: {
+                uTime: { value: 0 }
+            },
+            vertexShader: `
+                ${noiseGLSL}
+
+                uniform float uTime;
+                varying vec3 vPosition;
+                varying vec3 vNormal;
+                varying float vWaveHeight;
+
+                // Gerstner 波函数
+                vec3 gerstnerWave(vec3 pos, float wavelength, float steepness, vec2 direction, float speed) {
+                    float k = 2.0 * 3.14159 / wavelength;
+                    float c = sqrt(9.8 / k);
+                    vec2 d = normalize(direction);
+                    float f = k * (dot(d, pos.xy) - c * speed * uTime);
+                    float a = steepness / k;
+
+                    return vec3(
+                        d.x * a * cos(f),
+                        a * sin(f),
+                        d.y * a * cos(f)
+                    );
+                }
+
+                void main() {
+                    vec3 pos = position;
+
+                    // 多层 Gerstner 波叠加
+                    vec3 wave1 = gerstnerWave(pos, 8.0, 0.3, vec2(1.0, 0.0), 1.0);
+                    vec3 wave2 = gerstnerWave(pos, 5.0, 0.2, vec2(0.7, 0.7), 1.2);
+                    vec3 wave3 = gerstnerWave(pos, 3.0, 0.15, vec2(0.0, 1.0), 1.5);
+
+                    // 添加噪声细节
+                    float noise = fbm(vec3(pos.x * 0.1, pos.y * 0.1, uTime * 0.2)) * 0.3;
+
+                    pos += wave1 + wave2 + wave3;
+                    pos.z += noise;
+                    pos.z += 5.0; // 海面高度
+
+                    vPosition = pos;
+                    vWaveHeight = pos.z;
+
+                    // 计算法线（用于光照效果）
+                    float delta = 0.1;
+                    vec3 posX = position + vec3(delta, 0.0, 0.0);
+                    vec3 posY = position + vec3(0.0, delta, 0.0);
+
+                    vec3 waveX1 = gerstnerWave(posX, 8.0, 0.3, vec2(1.0, 0.0), 1.0);
+                    vec3 waveX2 = gerstnerWave(posX, 5.0, 0.2, vec2(0.7, 0.7), 1.2);
+                    vec3 waveX3 = gerstnerWave(posX, 3.0, 0.15, vec2(0.0, 1.0), 1.5);
+                    posX += waveX1 + waveX2 + waveX3;
+
+                    vec3 waveY1 = gerstnerWave(posY, 8.0, 0.3, vec2(1.0, 0.0), 1.0);
+                    vec3 waveY2 = gerstnerWave(posY, 5.0, 0.2, vec2(0.7, 0.7), 1.2);
+                    vec3 waveY3 = gerstnerWave(posY, 3.0, 0.15, vec2(0.0, 1.0), 1.5);
+                    posY += waveY1 + waveY2 + waveY3;
+
+                    vec3 tangentX = posX - pos;
+                    vec3 tangentY = posY - pos;
+                    vNormal = normalize(cross(tangentY, tangentX));
+
+                    gl_Position = projectionMatrix * modelViewMatrix * vec4(pos, 1.0);
+                }
+            `,
+            fragmentShader: `
+                varying vec3 vPosition;
+                varying vec3 vNormal;
+                varying float vWaveHeight;
+
+                void main() {
+                    // 海面颜色：浅蓝色，带有高光
+                    vec3 baseColor = vec3(0.3, 0.6, 0.8);
+
+                    // 简单的光照计算
+                    vec3 lightDir = normalize(vec3(1.0, 1.0, 1.0));
+                    float diffuse = max(dot(vNormal, lightDir), 0.0);
+
+                    // 高光
+                    vec3 viewDir = normalize(cameraPosition - vPosition);
+                    vec3 reflectDir = reflect(-lightDir, vNormal);
+                    float specular = pow(max(dot(viewDir, reflectDir), 0.0), 32.0);
+
+                    vec3 color = baseColor * (0.6 + 0.4 * diffuse) + vec3(1.0) * specular * 0.5;
+
+                    // 根据波浪高度添加一些颜色变化
+                    color += vec3(0.1) * sin(vWaveHeight * 2.0);
+
+                    gl_FragColor = vec4(color, 0.7);
+                }
+            `,
+            transparent: true,
+            side: THREE.DoubleSide
+        });
+
+        const surface = new THREE.Mesh(surfaceGeometry, surfaceMaterial);
+        surface.rotation.x = -Math.PI / 2;
+        scene.add(surface);
+
+        // ==================== 添加剖面边框（可选，增强剖面感） ====================
+        // 创建剖面的边框线，使剖面结构更清晰
+        const edgesGeometry = new THREE.EdgesGeometry(waterGeometry);
+        const edgesMaterial = new THREE.LineBasicMaterial({
+            color: 0x00ffff,
+            transparent: true,
+            opacity: 0.3
+        });
+        const edges = new THREE.LineSegments(edgesGeometry, edgesMaterial);
+        edges.position.copy(water.position);
+        scene.add(edges);
+
+        // ==================== 添加坐标轴辅助（可选） ====================
+        const axesHelper = new THREE.AxesHelper(30);
+        scene.add(axesHelper);
+
+        // ==================== 动画循环 ====================
+        const clock = new THREE.Clock();
+
+        function animate() {
+            requestAnimationFrame(animate);
+
+            const elapsedTime = clock.getElapsedTime();
+
+            // 更新 shader 的时间 uniform
+            surfaceMaterial.uniforms.uTime.value = elapsedTime;
+
+            // 更新控制器
+            controls.update();
+
+            // 渲染场景
+            renderer.render(scene, camera);
+        }
+
+        animate();
+
+        // ==================== 窗口大小调整 ====================
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+    </script>
+</body>
+</html>

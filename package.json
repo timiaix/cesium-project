@@ -1,0 +1,29 @@
+{
+  "name": "cesium2026",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc -b && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@element-plus/icons-vue": "^2.3.1",
+    "cesium": "^1.128.0",
+    "echarts": "^5.5.0",
+    "echarts-gl": "^2.0.9",
+    "echarts-stat": "^1.2.0",
+    "element-plus": "^2.8.4",
+    "pinia": "^2.2.6",
+    "three": "^0.182.0",
+    "vue": "^3.5.13"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5.2.1",
+    "typescript": "~5.6.2",
+    "vite": "^6.0.3",
+    "vite-plugin-cesium": "^1.2.23",
+    "vue-tsc": "^2.1.10"
+  }
+}
