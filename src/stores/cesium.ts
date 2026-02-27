@@ -78,9 +78,14 @@ export const useCesiumStore = defineStore('cesium', () => {
   /** 克里金插值面实体，清除时一并移除 */
   let krigingEntity: Entity | null = null
 
-  /** 栅格填值面实体（canvas：彩色底图 + 等经纬度权重黑色文字） */
+  /** 栅格填值面实体（canvas：彩色底图 + 等经纬度权重黑色文字，按视角高度 5 级 LOD） */
   let fillGridEntity: Entity | null = null
   const showFillGrid = ref(false)
+  /** 填值 LOD 用：边界、variogram、当前档位、preRender 移除函数 */
+  let fillGridBounds: { minx: number; maxx: number; miny: number; maxy: number } | null = null
+  let fillGridVariogram: ReturnType<typeof kriging.train> | null = null
+  let fillGridLodLevel = -1
+  let fillGridPreRenderRemover: (() => void) | null = null
 
   /** 海洋剖面矩形：第一次点击落点+预览线跟随鼠标，第二次点击固定矩形框 */
   let profileRectangleEntity: Entity | null = null
@@ -666,9 +671,31 @@ export const useCesiumStore = defineStore('cesium', () => {
     showKriging.value = false
   }
 
+  /** 根据相机高度（米）返回栅格填值 LOD 档位 0～4，越高视角值越少（越粗） */
+  function getFillGridLodLevel(cameraHeight: number): number {
+    if (cameraHeight > 400000) return 0
+    if (cameraHeight > 200000) return 1
+    if (cameraHeight > 100000) return 2
+    return 3
+  }
+
   /**
-   * 在已有 kriging 底图的 canvas 上，按等经度纬度格点填入黑色文字（权重值）
-   * grid 来自 kriging.grid，带有 xlim/ylim/width
+   * 第 level 档对应的格网间隔：以「纬度方向跨度 rangeY 的等分分母」为间隔依据。
+   * 间隔 = rangeY / div。分母越小间隔越大、文字越疏。整体缩小分母使放大后仍不致过密。
+   */
+  const FILL_GRID_LOD_DIVISORS = [5, 10, 18, 26, 34]
+
+  function getFillGridWidthForLevel(level: number, rangeY: number): number {
+    const div = FILL_GRID_LOD_DIVISORS[Math.min(level, FILL_GRID_LOD_DIVISORS.length - 1)]
+    return rangeY / div
+  }
+
+  /** 各 LOD 档位对应的文字字号：放大（档位高）稍小，缩小（档位低）稍大便于远看 */
+  const FILL_GRID_FONT_SIZES = [22, 20, 17, 15, 13]
+
+  /**
+   * 在已有 kriging 底图的 canvas 上，在栅格中心填入黑色文字（权重值）
+   * 每个格子取中心点 (i+0.5, j+0.5)*width 作为文字位置；lodLevel 用于选字号（放大时稍小）
    */
   function drawGridValueLabels(
     ctx: CanvasRenderingContext2D,
@@ -676,27 +703,29 @@ export const useCesiumStore = defineStore('cesium', () => {
     xlim: [number, number],
     ylim: [number, number],
     w: number,
-    h: number
+    h: number,
+    lodLevel: number
   ): void {
     const rangeX = xlim[1] - xlim[0]
     const rangeY = ylim[1] - ylim[0]
     const n = grid.length
     const m = grid[0]?.length ?? 0
     if (n === 0 || m === 0) return
-    // 格点过密时抽样绘制，避免文字叠在一起
-    const maxLabels = 35
+    const maxLabels = 14
     const stepI = Math.max(1, Math.floor(n / maxLabels))
     const stepJ = Math.max(1, Math.floor(m / maxLabels))
+    const fontSize = FILL_GRID_FONT_SIZES[Math.min(lodLevel, FILL_GRID_FONT_SIZES.length - 1)]
     ctx.fillStyle = '#000000'
     ctx.textAlign = 'center'
     ctx.textBaseline = 'middle'
-    ctx.font = '11px sans-serif'
+    ctx.font = `${fontSize}px sans-serif`
     for (let i = 0; i < n; i += stepI) {
       for (let j = 0; j < m; j += stepJ) {
         const val = grid[i][j]
         if (val === undefined || typeof val !== 'number') continue
-        const lng = grid.xlim[0] + i * grid.width
-        const lat = grid.ylim[0] + j * grid.width
+        // 画在栅格单元中心：(i+0.5, j+0.5) 对应的经纬度
+        const lng = grid.xlim[0] + (i + 0.5) * grid.width
+        const lat = grid.ylim[0] + (j + 0.5) * grid.width
         const px = ((lng - xlim[0]) / rangeX) * w
         const py = ((ylim[1] - lat) / rangeY) * h
         if (px < 0 || px > w || py < 0 || py > h) continue
@@ -706,31 +735,21 @@ export const useCesiumStore = defineStore('cesium', () => {
   }
 
   /**
-   * 栅格填值：根据克里金 grid 反算等经度纬度的权重值，在 canvas 上先绘彩色底图再填入黑色文字，渲染到地图
+   * 绘制指定 LOD 档位的栅格填值 canvas（彩色底图 + 黑色权重文字）
    */
-  function fillGrid(): void {
-    const v = viewer.value
-    if (!v) return
-    if (krigingValues.length < 4) return
-    if (fillGridEntity) {
-      v.entities.remove(fillGridEntity)
-      fillGridEntity = null
-    }
-    const positions = Cesium.Cartesian3.fromDegreesArray(krigingCoords)
-    const poly = Cesium.Rectangle.fromCartesianArray(positions)
-    const minx = Cesium.Math.toDegrees(poly.west)
-    const miny = Cesium.Math.toDegrees(poly.south)
-    const maxx = Cesium.Math.toDegrees(poly.east)
-    const maxy = Cesium.Math.toDegrees(poly.north)
+  function drawFillGridCanvas(lodLevel: number): HTMLCanvasElement | null {
+    if (!fillGridBounds || !fillGridVariogram) return null
+    const { minx, maxx, miny, maxy } = fillGridBounds
     const xlim: [number, number] = [minx, maxx]
     const ylim: [number, number] = [miny, maxy]
-    const variogram = kriging.train(krigingValues, krigingLngs, krigingLats, 'exponential', 0, 100)
-    const grid = kriging.grid(krigingCord, variogram, (maxy - miny) / 1000) as number[][] & {
+    const rangeY = maxy - miny
+    const width = getFillGridWidthForLevel(lodLevel, rangeY)
+    const grid = kriging.grid(krigingCord, fillGridVariogram, width) as number[][] & {
       xlim: [number, number]
       ylim: [number, number]
       width: number
     }
-    if (!grid || !grid.xlim || !grid.ylim) return
+    if (!grid || !grid.xlim || !grid.ylim) return null
     const canvas = document.createElement('canvas')
     const cw = 1024
     const ch = 1024
@@ -738,11 +757,36 @@ export const useCesiumStore = defineStore('cesium', () => {
     canvas.height = ch
     canvas.style.display = 'block'
     const ctx = canvas.getContext('2d')
-    if (!ctx) return
+    if (!ctx) return null
     ctx.globalAlpha = 0.85
     kriging.plot(canvas, grid, xlim, ylim, krigingColors)
     ctx.globalAlpha = 1
-    drawGridValueLabels(ctx, grid, xlim, ylim, cw, ch)
+    drawGridValueLabels(ctx, grid, xlim, ylim, cw, ch, lodLevel)
+    return canvas
+  }
+
+  /**
+   * 栅格填值：根据克里金 grid 反算等经度纬度的权重值，在 canvas 上先绘彩色底图再填入黑色文字，渲染到地图
+   * 按视角高度分 5 级 LOD：高度越高加载的值越少，高度越低加载的值越多
+   */
+  function fillGrid(): void {
+    const v = viewer.value
+    if (!v) return
+    if (krigingValues.length < 4) return
+    clearFillGrid()
+    const positions = Cesium.Cartesian3.fromDegreesArray(krigingCoords)
+    const poly = Cesium.Rectangle.fromCartesianArray(positions)
+    const minx = Cesium.Math.toDegrees(poly.west)
+    const miny = Cesium.Math.toDegrees(poly.south)
+    const maxx = Cesium.Math.toDegrees(poly.east)
+    const maxy = Cesium.Math.toDegrees(poly.north)
+    fillGridBounds = { minx, maxx, miny, maxy }
+    fillGridVariogram = kriging.train(krigingValues, krigingLngs, krigingLats, 'exponential', 0, 100)
+    const cam = v.camera
+    const height = cam.positionCartographic.height
+    fillGridLodLevel = getFillGridLodLevel(height)
+    const canvas = drawFillGridCanvas(fillGridLodLevel)
+    if (!canvas) return
     fillGridEntity = v.entities.add({
       polygon: {
         hierarchy: new Cesium.PolygonHierarchy(Cesium.Cartesian3.fromDegreesArray(krigingCoords)),
@@ -751,14 +795,37 @@ export const useCesiumStore = defineStore('cesium', () => {
     })
     showFillGrid.value = true
     v.zoomTo(fillGridEntity, new Cesium.HeadingPitchRange(0, Cesium.Math.toRadians(-45), 0))
+
+    const removeListener = v.scene.preRender.addEventListener(() => {
+      if (!fillGridEntity || !fillGridBounds || !fillGridVariogram) return
+      const h = v.camera.positionCartographic.height
+      const level = getFillGridLodLevel(h)
+      if (level === fillGridLodLevel) return
+      fillGridLodLevel = level
+      const newCanvas = drawFillGridCanvas(level)
+      if (!newCanvas) return
+      ;(fillGridEntity.polygon!.material as Cesium.ImageMaterialProperty).image =
+        new ConstantProperty(newCanvas)
+    })
+    fillGridPreRenderRemover = () => {
+      ;(removeListener as () => void)()
+      fillGridPreRenderRemover = null
+    }
   }
 
   function clearFillGrid(): void {
     const v = viewer.value
+    if (fillGridPreRenderRemover) {
+      fillGridPreRenderRemover()
+      fillGridPreRenderRemover = null
+    }
     if (v && fillGridEntity) {
       v.entities.remove(fillGridEntity)
       fillGridEntity = null
     }
+    fillGridBounds = null
+    fillGridVariogram = null
+    fillGridLodLevel = -1
     showFillGrid.value = false
   }
 
