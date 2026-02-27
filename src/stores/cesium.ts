@@ -78,6 +78,10 @@ export const useCesiumStore = defineStore('cesium', () => {
   /** 克里金插值面实体，清除时一并移除 */
   let krigingEntity: Entity | null = null
 
+  /** 栅格填值面实体（canvas：彩色底图 + 等经纬度权重黑色文字） */
+  let fillGridEntity: Entity | null = null
+  const showFillGrid = ref(false)
+
   /** 海洋剖面矩形：第一次点击落点+预览线跟随鼠标，第二次点击固定矩形框 */
   let profileRectangleEntity: Entity | null = null
   /** 矩形黄色边框（折线，因 rectangle outline 可能不显示） */
@@ -573,6 +577,7 @@ export const useCesiumStore = defineStore('cesium', () => {
       v.entities.remove(krigingEntity)
       krigingEntity = null
     }
+    clearFillGrid()
     drawLineEntity = null
     fixedLineEntity = null
     endDrawLine()
@@ -659,6 +664,102 @@ export const useCesiumStore = defineStore('cesium', () => {
       krigingEntity = null
     }
     showKriging.value = false
+  }
+
+  /**
+   * 在已有 kriging 底图的 canvas 上，按等经度纬度格点填入黑色文字（权重值）
+   * grid 来自 kriging.grid，带有 xlim/ylim/width
+   */
+  function drawGridValueLabels(
+    ctx: CanvasRenderingContext2D,
+    grid: number[][] & { xlim: [number, number]; ylim: [number, number]; width: number },
+    xlim: [number, number],
+    ylim: [number, number],
+    w: number,
+    h: number
+  ): void {
+    const rangeX = xlim[1] - xlim[0]
+    const rangeY = ylim[1] - ylim[0]
+    const n = grid.length
+    const m = grid[0]?.length ?? 0
+    if (n === 0 || m === 0) return
+    // 格点过密时抽样绘制，避免文字叠在一起
+    const maxLabels = 35
+    const stepI = Math.max(1, Math.floor(n / maxLabels))
+    const stepJ = Math.max(1, Math.floor(m / maxLabels))
+    ctx.fillStyle = '#000000'
+    ctx.textAlign = 'center'
+    ctx.textBaseline = 'middle'
+    ctx.font = '11px sans-serif'
+    for (let i = 0; i < n; i += stepI) {
+      for (let j = 0; j < m; j += stepJ) {
+        const val = grid[i][j]
+        if (val === undefined || typeof val !== 'number') continue
+        const lng = grid.xlim[0] + i * grid.width
+        const lat = grid.ylim[0] + j * grid.width
+        const px = ((lng - xlim[0]) / rangeX) * w
+        const py = ((ylim[1] - lat) / rangeY) * h
+        if (px < 0 || px > w || py < 0 || py > h) continue
+        ctx.fillText(Number(val).toFixed(1), px, py)
+      }
+    }
+  }
+
+  /**
+   * 栅格填值：根据克里金 grid 反算等经度纬度的权重值，在 canvas 上先绘彩色底图再填入黑色文字，渲染到地图
+   */
+  function fillGrid(): void {
+    const v = viewer.value
+    if (!v) return
+    if (krigingValues.length < 4) return
+    if (fillGridEntity) {
+      v.entities.remove(fillGridEntity)
+      fillGridEntity = null
+    }
+    const positions = Cesium.Cartesian3.fromDegreesArray(krigingCoords)
+    const poly = Cesium.Rectangle.fromCartesianArray(positions)
+    const minx = Cesium.Math.toDegrees(poly.west)
+    const miny = Cesium.Math.toDegrees(poly.south)
+    const maxx = Cesium.Math.toDegrees(poly.east)
+    const maxy = Cesium.Math.toDegrees(poly.north)
+    const xlim: [number, number] = [minx, maxx]
+    const ylim: [number, number] = [miny, maxy]
+    const variogram = kriging.train(krigingValues, krigingLngs, krigingLats, 'exponential', 0, 100)
+    const grid = kriging.grid(krigingCord, variogram, (maxy - miny) / 1000) as number[][] & {
+      xlim: [number, number]
+      ylim: [number, number]
+      width: number
+    }
+    if (!grid || !grid.xlim || !grid.ylim) return
+    const canvas = document.createElement('canvas')
+    const cw = 1024
+    const ch = 1024
+    canvas.width = cw
+    canvas.height = ch
+    canvas.style.display = 'block'
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return
+    ctx.globalAlpha = 0.85
+    kriging.plot(canvas, grid, xlim, ylim, krigingColors)
+    ctx.globalAlpha = 1
+    drawGridValueLabels(ctx, grid, xlim, ylim, cw, ch)
+    fillGridEntity = v.entities.add({
+      polygon: {
+        hierarchy: new Cesium.PolygonHierarchy(Cesium.Cartesian3.fromDegreesArray(krigingCoords)),
+        material: new Cesium.ImageMaterialProperty({ image: canvas }),
+      },
+    })
+    showFillGrid.value = true
+    v.zoomTo(fillGridEntity, new Cesium.HeadingPitchRange(0, Cesium.Math.toRadians(-45), 0))
+  }
+
+  function clearFillGrid(): void {
+    const v = viewer.value
+    if (v && fillGridEntity) {
+      v.entities.remove(fillGridEntity)
+      fillGridEntity = null
+    }
+    showFillGrid.value = false
   }
 
   /** 海量点 JSON 单条数据 */
@@ -1012,6 +1113,7 @@ export const useCesiumStore = defineStore('cesium', () => {
     drawLinePoints,
     showHHTLegend,
     showKriging,
+    showFillGrid,
     showContourLines,
     showMassPoints,
     showProfileRectangle,
@@ -1030,6 +1132,8 @@ export const useCesiumStore = defineStore('cesium', () => {
     clearRectangle,
     drawKriging,
     clearKriging,
+    fillGrid,
+    clearFillGrid,
     addMassPoints,
     clearMassPoints,
     addContourLines,

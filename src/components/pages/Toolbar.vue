@@ -8,6 +8,7 @@ const {
   isDrawingRectangle,
   showHHTLegend,
   showKriging,
+  showFillGrid,
   showContourLines,
   showMassPoints,
   showProfileRectangle,
@@ -48,6 +49,11 @@ function onClear() {
       克里金
     </el-button>
 
+    <el-button class="toolbar-btn" :type="showFillGrid ? 'primary' : 'default'" size="small"
+      @click="showFillGrid ? cesiumStore.clearFillGrid() : cesiumStore.fillGrid()">
+      栅格填值
+    </el-button>
+    
     <el-button class="toolbar-btn" :type="showHHTLegend ? 'primary' : 'default'" size="small"
       @click="cesiumStore.addHHT">
       水温图
