@@ -15,6 +15,7 @@ const {
   customTerrainLoaded,
   showWhiteModel,
   showBuildingTileset,
+  showDrone,
   isPickingAngleAndCoord,
 } = storeToRefs(cesiumStore)
 
@@ -113,6 +114,12 @@ function onClear() {
     >
       添加建筑
     </el-button>
+
+    <el-button class="toolbar-btn" :type="showDrone ? 'primary' : 'default'" size="small"
+      @click="showDrone ? cesiumStore.removeDrone() : cesiumStore.loadDroneOnGround()">
+      无人机
+    </el-button>
+
     <el-button class="toolbar-btn" size="small" @click="onClear">清除</el-button>
   </div>
 </template>

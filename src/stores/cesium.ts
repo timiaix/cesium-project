@@ -122,6 +122,12 @@ export const useCesiumStore = defineStore('cesium', () => {
   const customTerrainLoaded = ref(false)
   const showWhiteModel = ref(false)
   const showBuildingTileset = ref(false)
+  /** 无人机（ch.gltf）是否已加载并显示在地面 */
+  const showDrone = ref(false)
+
+  /** 无人机地面放置位置（仅加载测试用）：经度、纬度、高度(米) */
+  let droneModel: Cesium.Model | null = null
+  const DRONE_GROUND_POSITION = { longitude: 116.4, latitude: 39.9, height: 100 }
 
   /** 白模 GLB（public/chognqing/NoLod_0.glb），清除时可选移除 */
   let whiteModel: Cesium.Model | null = null
@@ -1115,6 +1121,52 @@ export const useCesiumStore = defineStore('cesium', () => {
     showBuildingTileset.value = false
   }
 
+  /**
+   * 加载无人机 ch.gltf 并固定放在地面位置，相机定位过去（用于验证模型能否正常加载）
+   */
+  async function loadDroneOnGround(): Promise<void> {
+    const v = viewer.value
+    if (!v) return
+    const pos = Cesium.Cartesian3.fromDegrees(
+      DRONE_GROUND_POSITION.longitude,
+      DRONE_GROUND_POSITION.latitude,
+      DRONE_GROUND_POSITION.height
+    )
+    if (droneModel) {
+      v.camera.flyToBoundingSphere(new Cesium.BoundingSphere(pos, 500), {
+        duration: 1.5,
+        offset: new Cesium.HeadingPitchRange(0, Cesium.Math.toRadians(-30), 800),
+      })
+      return
+    }
+    try {
+      const model = await Cesium.Model.fromGltfAsync({
+        url: '/models/BoxArticulations.gltf',
+        minimumPixelSize: 128,
+        maximumScale: 500,
+      })
+      model.modelMatrix = Cesium.Matrix4.fromTranslation(pos)
+      v.scene.primitives.add(model)
+      droneModel = model
+      showDrone.value = true
+      v.camera.flyToBoundingSphere(new Cesium.BoundingSphere(pos, 500), {
+        duration: 1.5,
+        offset: new Cesium.HeadingPitchRange(0, Cesium.Math.toRadians(-30), 800),
+      })
+    } catch (e) {
+      console.error('无人机 ch.gltf 加载失败:', e)
+    }
+  }
+
+  function removeDrone(): void {
+    const v = viewer.value
+    if (v && droneModel) {
+      v.scene.primitives.remove(droneModel)
+      droneModel = null
+    }
+    showDrone.value = false
+  }
+
   /** 水温图图例：颜色条对应的色板（不含透明 [0,0,0,0]），与 worker 一致，索引 1..20 */
   const hhtLegendColors = computed(() => hhtColorList.slice(1))
 
@@ -1187,6 +1239,7 @@ export const useCesiumStore = defineStore('cesium', () => {
     customTerrainLoaded,
     showWhiteModel,
     showBuildingTileset,
+    showDrone,
     hhtLegendColors,
     hhtLegendTempRange,
     init,
@@ -1212,6 +1265,8 @@ export const useCesiumStore = defineStore('cesium', () => {
     removeWhiteModel,
     addBuildingTileset,
     removeBuildingTileset,
+    loadDroneOnGround,
+    removeDrone,
     openTerrainProfile,
     closeTerrainProfile,
     openSectionChart,
