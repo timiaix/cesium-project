@@ -19,6 +19,7 @@ const {
   showBuildingTileset,
   showDrone,
   showThematicMap,
+  showHeatmap,
   isPickingAngleAndCoord,
 } = storeToRefs(cesiumStore)
 
@@ -50,6 +51,7 @@ function onClear() {
   cesiumStore.removeHHT()
   cesiumStore.clearDrawLine()
   cesiumStore.removeWhiteModel()
+  cesiumStore.removeHeatmap()
   cesiumStore.removeBuildingTileset()
 }
 </script>
@@ -141,6 +143,13 @@ function onClear() {
     </el-button>
     <el-button class="toolbar-btn" size="small" @click="router.push('/map2d')">
       二维地图
+    </el-button>
+    <el-button
+      class="toolbar-btn"
+      :type="showHeatmap ? 'primary' : 'default'"
+      size="small"
+      @click="showHeatmap ? cesiumStore.removeHeatmap() : cesiumStore.addHeatmap()">
+      热力图
     </el-button>
     <el-button class="toolbar-btn" size="small" @click="onClear">清除</el-button>
   </div>

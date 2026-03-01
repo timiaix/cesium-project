@@ -1167,6 +1167,148 @@ export const useCesiumStore = defineStore('cesium', () => {
     showDrone.value = false
   }
 
+  // ---------- 热力图 ----------
+  const showHeatmap = ref(false)
+  let heatmapImageryLayer: ImageryLayer | null = null
+
+  /** 热力图示例数据：经度、纬度、权重（如人口/密度），可替换为真实数据 */
+  const HEATMAP_BOUNDS = { west: 100, south: 20, east: 120, north: 45 }
+  const HEATMAP_DATA: { lon: number; lat: number; value: number }[] = [
+    { lon: 116.4, lat: 39.9, value: 95 },
+    { lon: 121.5, lat: 31.2, value: 98 },
+    { lon: 113.3, lat: 23.1, value: 88 },
+    { lon: 114.1, lat: 22.5, value: 82 },
+    { lon: 108.9, lat: 34.3, value: 65 },
+    { lon: 104.1, lat: 30.7, value: 72 },
+    { lon: 118.8, lat: 32.0, value: 78 },
+    { lon: 112.9, lat: 28.2, value: 58 },
+    { lon: 117.2, lat: 31.8, value: 68 },
+    { lon: 106.5, lat: 29.6, value: 75 },
+    { lon: 115.9, lat: 28.7, value: 62 },
+    { lon: 119.3, lat: 26.1, value: 55 },
+    { lon: 110.3, lat: 20.0, value: 48 },
+    { lon: 102.7, lat: 25.0, value: 52 },
+    { lon: 117.0, lat: 36.7, value: 70 },
+    { lon: 113.6, lat: 34.7, value: 60 },
+    { lon: 108.4, lat: 22.8, value: 45 },
+    { lon: 103.8, lat: 36.0, value: 58 },
+    { lon: 116.0, lat: 38.0, value: 85 },
+    { lon: 120.2, lat: 30.3, value: 90 },
+    { lon: 109.5, lat: 18.2, value: 42 },
+    { lon: 114.3, lat: 30.6, value: 76 },
+    { lon: 106.9, lat: 27.7, value: 54 },
+    { lon: 101.7, lat: 26.6, value: 50 },
+    { lon: 117.8, lat: 33.6, value: 72 },
+    { lon: 115.0, lat: 32.5, value: 68 },
+    { lon: 111.0, lat: 34.5, value: 55 },
+    { lon: 105.9, lat: 21.0, value: 38 },
+    { lon: 119.5, lat: 26.5, value: 65 },
+    { lon: 113.0, lat: 28.2, value: 70 },
+    { lon: 116.5, lat: 40.2, value: 60 },
+    { lon: 121.0, lat: 31.5, value: 92 },
+    { lon: 109.0, lat: 34.2, value: 52 },
+    { lon: 104.6, lat: 31.0, value: 66 },
+    { lon: 117.5, lat: 39.0, value: 78 },
+    { lon: 112.5, lat: 37.8, value: 58 },
+    { lon: 118.0, lat: 24.5, value: 48 },
+    { lon: 106.0, lat: 26.5, value: 55 },
+    { lon: 115.5, lat: 38.9, value: 72 },
+    { lon: 110.8, lat: 32.0, value: 62 },
+  ]
+
+  /** 将强度 0~1 映射为半透明蓝-绿-红渐变；无数据（t≈0）为完全透明 */
+  function heatmapColor(t: number): { r: number; g: number; b: number; a: number } {
+    if (t <= 0) return { r: 0, g: 0, b: 0, a: 0 }
+    const a = 0.7
+    if (t <= 0.33) {
+      const s = t / 0.33
+      return { r: 0, g: Math.round(s * 255), b: 255, a }
+    }
+    if (t <= 0.66) {
+      const s = (t - 0.33) / 0.33
+      return { r: Math.round(s * 255), g: 255, b: Math.round((1 - s) * 255), a }
+    }
+    const s = (t - 0.66) / 0.34
+    return { r: 255, g: Math.round((1 - s) * 255), b: 0, a }
+  }
+
+  const HEATMAP_SIZE = 1024
+  function createHeatmapCanvas(): string {
+    const w = HEATMAP_SIZE
+    const h = HEATMAP_SIZE
+    const { west, south, east, north } = HEATMAP_BOUNDS
+    const intensity = new Float32Array(w * h)
+    const radius = 36
+    const maxVal = Math.max(...HEATMAP_DATA.map((d) => d.value), 1)
+
+    for (const p of HEATMAP_DATA) {
+      const x = ((p.lon - west) / (east - west)) * (w - 1)
+      const y = (1 - (p.lat - south) / (north - south)) * (h - 1)
+      const v = p.value / maxVal
+      for (let dy = -radius; dy <= radius; dy++) {
+        for (let dx = -radius; dx <= radius; dx++) {
+          const dist = Math.sqrt(dx * dx + dy * dy)
+          if (dist > radius) continue
+          const g = Math.exp(-(dist * dist) / (2 * (radius / 2) ** 2)) * v
+          const px = Math.round(x + dx)
+          const py = Math.round(y + dy)
+          if (px >= 0 && px < w && py >= 0 && py < h) {
+            intensity[py * w + px] += g
+          }
+        }
+      }
+    }
+    let maxI = 0
+    for (let i = 0; i < intensity.length; i++) {
+      if (intensity[i] > maxI) maxI = intensity[i]
+    }
+    if (maxI <= 0) maxI = 1
+    const canvas = document.createElement('canvas')
+    canvas.width = w
+    canvas.height = h
+    const ctx = canvas.getContext('2d')!
+    const imgData = ctx.createImageData(w, h)
+    const opacityThreshold = 0.02
+    for (let i = 0; i < w * h; i++) {
+      const raw = intensity[i] / maxI
+      const t = raw < opacityThreshold ? 0 : Math.min(1, raw)
+      const c = heatmapColor(t)
+      imgData.data[i * 4] = c.r
+      imgData.data[i * 4 + 1] = c.g
+      imgData.data[i * 4 + 2] = c.b
+      imgData.data[i * 4 + 3] = Math.round(c.a * 255)
+    }
+    ctx.putImageData(imgData, 0, 0)
+    return canvas.toDataURL('image/png')
+  }
+
+  function addHeatmap(): void {
+    const v = viewer.value
+    if (!v) return
+    if (heatmapImageryLayer) {
+      v.imageryLayers.remove(heatmapImageryLayer)
+      heatmapImageryLayer = null
+    }
+    const { west, south, east, north } = HEATMAP_BOUNDS
+    const dataUrl = createHeatmapCanvas()
+    const provider = new Cesium.SingleTileImageryProvider({
+      url: dataUrl,
+      rectangle: Cesium.Rectangle.fromDegrees(west, south, east, north),
+      tileWidth: HEATMAP_SIZE,
+      tileHeight: HEATMAP_SIZE,
+    })
+    heatmapImageryLayer = v.imageryLayers.addImageryProvider(provider)
+    showHeatmap.value = true
+  }
+
+  function removeHeatmap(): void {
+    const v = viewer.value
+    if (!v || !heatmapImageryLayer) return
+    v.imageryLayers.remove(heatmapImageryLayer)
+    heatmapImageryLayer = null
+    showHeatmap.value = false
+  }
+
   /** 水温图图例：颜色条对应的色板（不含透明 [0,0,0,0]），与 worker 一致，索引 1..20 */
   const hhtLegendColors = computed(() => hhtColorList.slice(1))
 
@@ -1550,6 +1692,7 @@ export const useCesiumStore = defineStore('cesium', () => {
     showWhiteModel,
     showBuildingTileset,
     showDrone,
+    showHeatmap,
     hhtLegendColors,
     hhtLegendTempRange,
     init,
@@ -1577,6 +1720,8 @@ export const useCesiumStore = defineStore('cesium', () => {
     removeBuildingTileset,
     loadDroneOnGround,
     removeDrone,
+    addHeatmap,
+    removeHeatmap,
     openTerrainProfile,
     closeTerrainProfile,
     openSectionChart,
