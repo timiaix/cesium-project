@@ -53,6 +53,18 @@
 
 ![添加建筑](public/projectPng/添加建筑.png)
 
+### 栅格填值
+
+基于克里金插值结果，在等间距经纬格网上反算权重值，以彩色底图 + 黑色文字标注在栅格中心显示，并渲染到三维地图。支持按视角高度分档切换格网密度与字号，视角越高格网越疏、文字越少，视角越低格网越密、文字越多。
+
+![栅格填值](public/projectPng/栅格填值.png)
+
+### 二维 OpenLayers
+
+独立路由页面（/map2d）使用 OpenLayers 加载二维底图（ArcGIS Online 世界街道图），左上角仅保留「返回三维地图」链接，无放大缩小等默认控件，便于国内访问。
+
+![二维openlayer](public/projectPng/二维openlayer.png)
+
 ## 技术栈
 
 - **Vue 3** + **TypeScript**
