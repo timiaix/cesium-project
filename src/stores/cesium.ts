@@ -122,7 +122,7 @@ export const useCesiumStore = defineStore('cesium', () => {
   const customTerrainLoaded = ref(false)
   const showWhiteModel = ref(false)
   const showBuildingTileset = ref(false)
-  /** 无人机（ch.gltf）是否已加载并显示在地面 */
+  /** 无人机/救援船（rescueShip.glb）是否已加载并显示在地面 */
   const showDrone = ref(false)
 
   /** 无人机地面放置位置（仅加载测试用）：经度、纬度、高度(米) */
@@ -1122,7 +1122,7 @@ export const useCesiumStore = defineStore('cesium', () => {
   }
 
   /**
-   * 加载无人机 ch.gltf 并固定放在地面位置，相机定位过去（用于验证模型能否正常加载）
+   * 加载 rescueShip.glb 并固定放在地面位置，相机定位过去（用于验证模型能否正常加载）
    */
   async function loadDroneOnGround(): Promise<void> {
     const v = viewer.value
@@ -1141,7 +1141,7 @@ export const useCesiumStore = defineStore('cesium', () => {
     }
     try {
       const model = await Cesium.Model.fromGltfAsync({
-        url: '/models/BoxArticulations.gltf',
+        url: '/models/Duck.glb',
         minimumPixelSize: 128,
         maximumScale: 500,
       })
@@ -1154,7 +1154,7 @@ export const useCesiumStore = defineStore('cesium', () => {
         offset: new Cesium.HeadingPitchRange(0, Cesium.Math.toRadians(-30), 800),
       })
     } catch (e) {
-      console.error('无人机 ch.gltf 加载失败:', e)
+      console.error('rescueShip.glb 加载失败:', e)
     }
   }
 
@@ -1173,6 +1173,17 @@ export const useCesiumStore = defineStore('cesium', () => {
   /** 水温图图例：温度范围（与 PNG 数据 min/max 对应，显示用 -5～35） */
   const hhtLegendTempRange = { min: -5, max: 35 }
 
+  /** 专题图：保存的相机视口（关闭时恢复） */
+  let savedThematicView: { west: number; south: number; east: number; north: number } | null = null
+  /** 专题图：原始 Cesium 容器，用于关闭时把 canvas 移回 */
+  let originalCesiumContainer: HTMLElement | null = null
+  /** 专题图：经纬网实体与标签，关闭时移除 */
+  const thematicGridEntities: Entity[] = []
+  const thematicGridLabels: Entity[] = []
+  let thematicGridDegree = 0
+  let thematicGridRemoveListener: (() => void) | null = null
+  let thematicGridLabelRemoveListener: (() => void) | null = null
+
   /** 初始化 Cesium Viewer，传入容器元素或容器 id */
   function init(
     container: HTMLElement | string,
@@ -1181,12 +1192,20 @@ export const useCesiumStore = defineStore('cesium', () => {
     if (viewer.value) {
       destroy()
     }
+    const containerEl = typeof container === 'string' ? document.getElementById(container)! : container
+    originalCesiumContainer = containerEl
     const CesiumIonDefaultAccessToken = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJqdGkiOiJiNjkzYTRmNy04NDhiLTQyZTMtYThmNi1jOWY4ODZjNDgxNTQiLCJpZCI6MzYyOTgzLCJpYXQiOjE3NjM4ODQwMjN9.ilfgQf4D7uhqWvA2C3dSbOduhYDbG1MFiEGMmJ5_rYI'
+    Cesium.Ion.defaultAccessToken = CesiumIonDefaultAccessToken
 
-    Cesium.Ion.defaultAccessToken = CesiumIonDefaultAccessToken;
-    // 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJqdGkiOiI2YmRiNjM4MC1kMDZkLTQ2NDQtYjQ3My0xZDI4MDU0MGJhZDciLCJpZCI6MzIxMzAsInNjb3BlcyI6WyJhc3IiLCJnYyJdLCJpYXQiOjE1OTY1MjM4NzZ9.A3FBZ6HjKkTsOGnjwWWeO9L10HQ9c-wcF4c3dtTc4gQ'
-     viewer.value = new Viewer(
-      typeof container === 'string' ? document.getElementById(container)! : container,
+    // 使用 OSM 底图 + 椭球地形，不依赖 Cesium Ion 请求，避免 ERR_CONNECTION_RESET
+    const imageryProvider = new Cesium.UrlTemplateImageryProvider({
+      url: 'https://a.tile.openstreetmap.org/{z}/{x}/{y}.png',
+      credit: '© OpenStreetMap contributors',
+    })
+    const terrainProvider = new Cesium.EllipsoidTerrainProvider()
+
+    viewer.value = new Viewer(
+      containerEl,
       {
         animation: false,
         baseLayerPicker: true,
@@ -1198,6 +1217,10 @@ export const useCesiumStore = defineStore('cesium', () => {
         selectionIndicator: true,
         timeline: false,
         useDefaultRenderLoop: true,
+        imageryProvider,
+        terrainProvider,
+        // 保留绘图缓冲区，便于专题图导出时能正确截取到地图内容（否则 canvas 会导出为黑图）
+        contextOptions: { preserveDrawingBuffer: true },
         ...options,
       }
     )
@@ -1219,6 +1242,293 @@ export const useCesiumStore = defineStore('cesium', () => {
       throw new Error('[CesiumStore] Viewer 尚未初始化，请先挂载地图组件或调用 init()')
     }
     return viewer.value
+  }
+
+  /** 专题图面板是否显示 */
+  const showThematicMap = ref(false)
+
+  const THEMATIC_MAP_CANVAS_WIDTH = 1350
+  const THEMATIC_MAP_CANVAS_HEIGHT = 740
+
+  function getViewRectangle2D(v: Viewer): { west: number; south: number; east: number; north: number } | null {
+    const scene = v.scene
+    const camera = v.camera
+    const canvas = scene.canvas
+    const width = canvas.clientWidth
+    const height = canvas.clientHeight
+    const corners = [
+      new Cesium.Cartesian2(0, 0),
+      new Cesium.Cartesian2(width, 0),
+      new Cesium.Cartesian2(0, height),
+      new Cesium.Cartesian2(width, height),
+    ]
+    const positions = corners.map((corner) => {
+      const pickRay = camera.getPickRay(corner)
+      if (!pickRay) return null
+      const pickPosition = scene.globe.pick(pickRay, scene)
+      if (pickPosition) {
+        const cartographic = Cesium.Cartographic.fromCartesian(pickPosition)
+        return {
+          lon: Cesium.Math.toDegrees(cartographic.longitude),
+          lat: Cesium.Math.toDegrees(cartographic.latitude),
+        }
+      }
+      return null
+    })
+    const valid = positions.filter((p): p is { lon: number; lat: number } => p !== null)
+    if (valid.length === 0) return null
+    const west = Math.min(...valid.map((p) => p.lon))
+    const south = Math.min(...valid.map((p) => p.lat))
+    const east = Math.max(...valid.map((p) => p.lon))
+    const north = Math.max(...valid.map((p) => p.lat))
+    return { west, south, east, north }
+  }
+
+  function drawThematicGrid(v: Viewer, degree: number): void {
+    thematicGridEntities.length = 0
+    const entities = v.entities
+    for (let lat = -90; lat <= 90; lat += degree) {
+      const positions = []
+      for (let lon = -180; lon <= 180; lon += degree) {
+        positions.push(Cesium.Cartesian3.fromDegrees(lon, lat))
+      }
+      thematicGridEntities.push(
+        entities.add({
+          polyline: {
+            positions,
+            width: 1.0,
+            material: Cesium.Color.WHITE.withAlpha(0.5),
+          },
+        })
+      )
+    }
+    for (let lon = -180; lon <= 180; lon += degree) {
+      const positions = []
+      for (let lat = -90; lat <= 90; lat += degree) {
+        positions.push(Cesium.Cartesian3.fromDegrees(lon, lat))
+      }
+      thematicGridEntities.push(
+        entities.add({
+          polyline: {
+            positions,
+            width: 1.0,
+            material: Cesium.Color.WHITE.withAlpha(0.5),
+          },
+        })
+      )
+    }
+  }
+
+  function drawThematicGridLabel(v: Viewer, _degree: number, labelsDegree: number): void {
+    thematicGridLabels.length = 0
+    const rect = getViewRectangle2D(v)
+    if (!rect) return
+    const entities = v.entities
+    for (let lat = -90; lat <= 90; lat += labelsDegree) {
+      thematicGridLabels.push(
+        entities.add({
+          position: Cesium.Cartesian3.fromDegrees(rect.east, lat, 0),
+          label: {
+            text: `${lat < 0 ? `${Math.abs(lat)}°S` : `${lat}°N`}`,
+            font: '12px sans-serif',
+            style: Cesium.LabelStyle.FILL_AND_OUTLINE,
+            outlineWidth: 2,
+            outlineColor: Cesium.Color.WHITE,
+            fillColor: Cesium.Color.YELLOW,
+            pixelOffset: new Cesium.Cartesian2(-20, 0),
+          },
+        })
+      )
+      thematicGridLabels.push(
+        entities.add({
+          position: Cesium.Cartesian3.fromDegrees(rect.west, lat, 0),
+          label: {
+            text: `${lat < 0 ? `${Math.abs(lat)}°S` : `${lat}°N`}`,
+            font: '12px sans-serif',
+            style: Cesium.LabelStyle.FILL_AND_OUTLINE,
+            outlineWidth: 2,
+            outlineColor: Cesium.Color.WHITE,
+            fillColor: Cesium.Color.YELLOW,
+            pixelOffset: new Cesium.Cartesian2(20, 0),
+          },
+        })
+      )
+    }
+    for (let lon = -180; lon <= 180; lon += labelsDegree) {
+      thematicGridLabels.push(
+        entities.add({
+          position: Cesium.Cartesian3.fromDegrees(lon, rect.north, 0),
+          label: {
+            text: `${lon < 0 ? `${Math.abs(lon)}°W` : `${lon}°E`}`,
+            font: '12px sans-serif',
+            style: Cesium.LabelStyle.FILL_AND_OUTLINE,
+            outlineWidth: 2,
+            outlineColor: Cesium.Color.WHITE,
+            fillColor: Cesium.Color.YELLOW,
+            pixelOffset: new Cesium.Cartesian2(0, 10),
+          },
+        })
+      )
+      thematicGridLabels.push(
+        entities.add({
+          position: Cesium.Cartesian3.fromDegrees(lon, rect.south, 0),
+          label: {
+            text: `${lon < 0 ? `${Math.abs(lon)}°W` : `${lon}°E`}`,
+            font: '12px sans-serif',
+            style: Cesium.LabelStyle.FILL_AND_OUTLINE,
+            outlineWidth: 2,
+            outlineColor: Cesium.Color.WHITE,
+            fillColor: Cesium.Color.YELLOW,
+            pixelOffset: new Cesium.Cartesian2(0, -10),
+          },
+        })
+      )
+    }
+  }
+
+  function runThematicGrid(): void {
+    const v = viewer.value
+    if (!v) return
+    const height = v.camera.positionCartographic.height
+    let degree: number
+    if (height > 20000000) {
+      degree = 40
+    } else if (height > 5000000) {
+      degree = 10
+    } else if (height > 2039144) {
+      degree = 5
+    } else if (height > 100000) {
+      degree = 2
+    } else {
+      degree = 1
+    }
+    if (degree !== thematicGridDegree) {
+      thematicGridDegree = degree
+      drawThematicGrid(v, degree)
+    }
+  }
+
+  function runThematicGridLabel(): void {
+    const v = viewer.value
+    if (!v) return
+    const height = v.camera.positionCartographic.height
+    let labelsDegree = 10
+    let degree: number
+    if (height > 20000000) {
+      degree = 40
+      labelsDegree = 40
+    } else if (height > 5000000) {
+      degree = 10
+    } else if (height > 2039144) {
+      degree = 5
+      labelsDegree = 5
+    } else if (height > 100000) {
+      degree = 2
+      labelsDegree = 4
+    } else {
+      degree = 1
+      labelsDegree = 2
+    }
+    drawThematicGridLabel(v, degree, labelsDegree)
+  }
+
+  function removeThematicGridListeners(): void {
+    if (thematicGridRemoveListener) {
+      thematicGridRemoveListener()
+      thematicGridRemoveListener = null
+    }
+    if (thematicGridLabelRemoveListener) {
+      thematicGridLabelRemoveListener()
+      thematicGridLabelRemoveListener = null
+    }
+  }
+
+  function clearThematicGrid(): void {
+    const v = viewer.value
+    if (!v) return
+    removeThematicGridListeners()
+    thematicGridEntities.forEach((e) => v.entities.remove(e))
+    thematicGridEntities.length = 0
+    thematicGridLabels.forEach((e) => v.entities.remove(e))
+    thematicGridLabels.length = 0
+    thematicGridDegree = 0
+  }
+
+  /** 打开专题图：保存视口、切 2D、将 canvas 挂到面板容器 */
+  function openThematicMap(panelMapContainer: HTMLElement): void {
+    const v = viewer.value
+    if (!v || !originalCesiumContainer) return
+    const rect = v.camera.computeViewRectangle()
+    if (!rect) return
+    savedThematicView = {
+      west: Cesium.Math.toDegrees(rect.west),
+      south: Cesium.Math.toDegrees(rect.south),
+      east: Cesium.Math.toDegrees(rect.east),
+      north: Cesium.Math.toDegrees(rect.north),
+    }
+    v.scene.morphTo2D(2)
+    v.camera.setView({ destination: rect })
+    const canvas = v.scene.canvas
+    if (canvas.parentElement) canvas.parentElement.removeChild(canvas)
+    ;(canvas as HTMLCanvasElement).width = THEMATIC_MAP_CANVAS_WIDTH
+    ;(canvas as HTMLCanvasElement).height = THEMATIC_MAP_CANVAS_HEIGHT
+    panelMapContainer.appendChild(canvas)
+    showThematicMap.value = true
+  }
+
+  /** 关闭专题图：canvas 归位、恢复 3D 与视口 */
+  function closeThematicMap(): void {
+    if (!showThematicMap.value) return
+    const v = viewer.value
+    if (!v || !originalCesiumContainer) return
+    clearThematicGrid()
+    const canvas = v.scene.canvas as HTMLCanvasElement
+    if (canvas.parentElement) canvas.parentElement.removeChild(canvas)
+    originalCesiumContainer.appendChild(canvas)
+    canvas.style.width = '100%'
+    canvas.style.height = '100%'
+    canvas.style.display = ''
+    v.scene.morphTo3D(0)
+    if (savedThematicView) {
+      v.camera.setView({
+        destination: Cesium.Rectangle.fromDegrees(
+          savedThematicView.west,
+          savedThematicView.south,
+          savedThematicView.east,
+          savedThematicView.north
+        ),
+      })
+      savedThematicView = null
+    }
+    const doResize = () => {
+      const cw = originalCesiumContainer!.clientWidth
+      const ch = originalCesiumContainer!.clientHeight
+      if (cw && ch) {
+        canvas.width = cw
+        canvas.height = ch
+      }
+      if (typeof (v as any).resize === 'function') {
+        ;(v as any).resize()
+      }
+      v.scene.requestRender()
+    }
+    doResize()
+    requestAnimationFrame(() => {
+      doResize()
+      showThematicMap.value = false
+    })
+  }
+
+  /** 专题图：开启经纬网（并监听相机更新） */
+  function addThematicGrid(): void {
+    const v = viewer.value
+    if (!v) return
+    v.camera.changed.addEventListener(runThematicGrid)
+    thematicGridRemoveListener = () => v.camera.changed.removeEventListener(runThematicGrid)
+    v.camera.moveEnd.addEventListener(runThematicGridLabel)
+    thematicGridLabelRemoveListener = () => v.camera.moveEnd.removeEventListener(runThematicGridLabel)
+    runThematicGrid()
+    runThematicGridLabel()
   }
 
   return {
@@ -1277,5 +1587,10 @@ export const useCesiumStore = defineStore('cesium', () => {
     isPickingAngleAndCoord,
     startPickingAngleAndCoord,
     stopPickingAngleAndCoord,
+    showThematicMap,
+    openThematicMap,
+    closeThematicMap,
+    clearThematicGrid,
+    addThematicGrid,
   }
 })

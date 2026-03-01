@@ -16,8 +16,17 @@ const {
   showWhiteModel,
   showBuildingTileset,
   showDrone,
+  showThematicMap,
   isPickingAngleAndCoord,
 } = storeToRefs(cesiumStore)
+
+function toggleThematicMap() {
+  if (showThematicMap.value) {
+    cesiumStore.closeThematicMap()
+  } else {
+    showThematicMap.value = true
+  }
+}
 
 function togglePickingAngleAndCoord() {
   if (isPickingAngleAndCoord.value) {
@@ -120,6 +129,14 @@ function onClear() {
       无人机
     </el-button>
 
+
+    <el-button
+      class="toolbar-btn"
+      :type="showThematicMap ? 'primary' : 'default'"
+      size="small"
+      @click="toggleThematicMap">
+      专题地图
+    </el-button>
     <el-button class="toolbar-btn" size="small" @click="onClear">清除</el-button>
   </div>
 </template>

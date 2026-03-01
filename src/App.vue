@@ -6,10 +6,11 @@ import TerrainProfile from '@/components/pages/TerrainProfile/TerrainProfile.vue
 import TerrainSectionChart from '@/components/pages/TerrainProfile/TerrainSectionChart.vue'
 import TemperatureLegend from '@/components/pages/TemperatureLegend.vue'
 import TreeTerrain from '@/components/pages/ThreeTerrain/TreeTerrain.vue'
+import ThematicMapPanel from '@/components/pages/ThematicMapPanel.vue'
 import { useCesiumStore } from '@/stores/cesium'
 
 const cesiumStore = useCesiumStore()
-const { showTerrainProfile, showSectionChart, sectionChartData, showHHTLegend, showOceanProfile } =
+const { showTerrainProfile, showSectionChart, sectionChartData, showHHTLegend, showOceanProfile, showThematicMap } =
   storeToRefs(cesiumStore)
 </script>
 
@@ -21,6 +22,7 @@ const { showTerrainProfile, showSectionChart, sectionChartData, showHHTLegend, s
     <TerrainProfile v-if="showTerrainProfile" />
     <TerrainSectionChart v-if="showSectionChart" :data="sectionChartData" />
     <TreeTerrain v-if="showOceanProfile" />
+    <ThematicMapPanel v-if="showThematicMap" />
   </div>
 </template>
 

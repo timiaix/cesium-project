@@ -20,10 +20,10 @@ Array.prototype.pip = function(x, y) {
     }
     return c;
 };
-
+const C=null;
 const kriging = (function() {
     const kriging = {};
-
+    
     const createArrayWithValues = (value, n) => {
         const array = [];
         for (let i = 0; i < n; i++) {

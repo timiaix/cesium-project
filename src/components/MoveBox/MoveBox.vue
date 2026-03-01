@@ -87,6 +87,9 @@ onUnmounted(() => {
     >
       <span v-if="title" class="move-box__title">{{ title }}</span>
       <span v-else class="move-box__title">拖拽移动</span>
+      <div class="move-box__header-right" @mousedown.stop @touchstart.stop>
+        <slot name="headerRight" />
+      </div>
     </div>
     <div class="move-box__body">
       <slot />
@@ -113,6 +116,15 @@ onUnmounted(() => {
   cursor: move;
   user-select: none;
   flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.move-box__header-right {
+  flex-shrink: 0;
+  cursor: default;
 }
 
 .move-box__header--dragging {
