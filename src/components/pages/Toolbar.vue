@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import { storeToRefs } from 'pinia'
+import { useRouter } from 'vue-router'
 import { useCesiumStore } from '@/stores/cesium'
 
+const router = useRouter()
 const cesiumStore = useCesiumStore()
 const {
   showTerrainProfile,
@@ -136,6 +138,9 @@ function onClear() {
       size="small"
       @click="toggleThematicMap">
       专题地图
+    </el-button>
+    <el-button class="toolbar-btn" size="small" @click="router.push('/map2d')">
+      二维地图
     </el-button>
     <el-button class="toolbar-btn" size="small" @click="onClear">清除</el-button>
   </div>
